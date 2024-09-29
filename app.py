@@ -1,7 +1,7 @@
-# Import libraries
-import cv2 # for reading images, draw bounding boxes
-from ultralytics import YOLO 
-import gradio as gr
+import cv2  # For reading and displaying images
+from ultralytics import YOLO  # YOLO model
+import os  # For file handling
+from pdf2image import convert_from_path  # For converting PDF pages to images
 
 # Define constants
 ENTITIES_COLORS = {
@@ -19,64 +19,118 @@ ENTITIES_COLORS = {
 }
 BOX_PADDING = 2
 
-# Load models
-DETECTION_MODEL = YOLO("models/dla-model.pt") 
+# Load the YOLO model
+DETECTION_MODEL = YOLO("dla-model.pt")  # Make sure to use the correct path to your YOLO model
+import matplotlib.pyplot as plt
 
-def detect(image_path):
+def detect(image_path, output_dir="output", show_image=False):
     """
-    Output inference image with bounding box
-
+    Detect objects in an image, draw bounding boxes, and save the result.
+    
     Args:
-    - image: to check for checkboxes
+    - image_path (str): Path to the image file.
+    - output_dir (str): Directory to save the output image.
+    - show_image (bool): If True, display the image after detection using matplotlib.
 
-    Return: image with bounding boxes drawn 
+    Returns:
+    - image (numpy.ndarray): Image with bounding boxes drawn.
     """
     image = cv2.imread(image_path)
     if image is None:
-        return image
+        print(f"Image not found: {image_path}")
+        return None
     
-    # Predict on image
-    results = DETECTION_MODEL.predict(source=image, conf=0.2, iou=0.8) # Predict on image
-    boxes = results[0].boxes # Get bounding boxes
+    # Perform prediction on the image using the YOLO model
+    results = DETECTION_MODEL.predict(source=image, conf=0.2, iou=0.8)
+    boxes = results[0].boxes  # Get bounding boxes
 
     if len(boxes) == 0:
+        print("No objects detected.")
         return image
 
-    # Get bounding boxes
+    # Iterate through each detected bounding box
     for box in boxes:
-        detection_class_conf = round(box.conf.item(), 2)
-        cls = list(ENTITIES_COLORS)[int(box.cls)]
-        # Get start and end points of the current box
+        detection_class_conf = round(box.conf.item(), 2)  # Confidence score
+        class_index = int(box.cls)
+        cls = list(ENTITIES_COLORS)[class_index] if class_index < len(ENTITIES_COLORS) else "Unknown"
+        
+        # Log if class is not found in the dictionary
+        if cls == "Unknown":
+            print(f"Warning: Detected class index {class_index} is not mapped in ENTITIES_COLORS.")
+        
+        # Get start and end points of the bounding box
         start_box = (int(box.xyxy[0][0]), int(box.xyxy[0][1]))
         end_box = (int(box.xyxy[0][2]), int(box.xyxy[0][3]))
 
-        
-        # 01. DRAW BOUNDING BOX OF OBJECT
+        # Draw bounding box with a color based on the class (default color for unknown classes)
+        color = ENTITIES_COLORS.get(cls, (0, 255, 0))  # Green for unknown classes
         line_thickness = round(0.002 * (image.shape[0] + image.shape[1]) / 2) + 1
         image = cv2.rectangle(img=image, 
                               pt1=start_box, 
                               pt2=end_box,
-                              color=ENTITIES_COLORS[cls], 
-                              thickness = line_thickness) # Draw the box with predefined colors
+                              color=color, 
+                              thickness=line_thickness)
+
+        # Create label text (class + confidence)
+        text = f"{cls} {detection_class_conf}"
         
-        # 02. DRAW LABEL
-        text = cls + " " + str(detection_class_conf)
-        # Get text dimensions to draw wrapping box
-        font_thickness =  max(line_thickness - 1, 1)
-        (text_w, text_h), _ = cv2.getTextSize(text=text, fontFace=2, fontScale=line_thickness/3, thickness=font_thickness)
-        # Draw wrapping box for text
+        # Get text dimensions for label background
+        font_thickness = max(line_thickness - 1, 1)
+        (text_w, text_h), _ = cv2.getTextSize(text=text, fontFace=2, fontScale=line_thickness / 3, thickness=font_thickness)
+        
+        # Draw background rectangle for the label
         image = cv2.rectangle(img=image,
-                              pt1=(start_box[0], start_box[1] - text_h - BOX_PADDING*2),
+                              pt1=(start_box[0], start_box[1] - text_h - BOX_PADDING * 2),
                               pt2=(start_box[0] + text_w + BOX_PADDING * 2, start_box[1]),
-                              color=ENTITIES_COLORS[cls],
+                              color=color,
                               thickness=-1)
-        # Put class name on image
+
+        # Put text (label) on top of the background rectangle
         start_text = (start_box[0] + BOX_PADDING, start_box[1] - BOX_PADDING)
-        image = cv2.putText(img=image, text=text, org=start_text, fontFace=0, color=(255,255,255), fontScale=line_thickness/3, thickness=font_thickness)
-        
+        image = cv2.putText(img=image, text=text, org=start_text, fontFace=0, color=(255, 255, 255), fontScale=line_thickness / 3, thickness=font_thickness)
+    
+    # Save the image with bounding boxes
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    output_path = os.path.join(output_dir, os.path.basename(image_path))
+    cv2.imwrite(output_path, image)
+    print(f"Image saved to {output_path}")
+    
+    # Optionally show the image using matplotlib
+    if show_image:
+        # Convert BGR image (OpenCV default) to RGB for matplotlib
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        plt.imshow(image_rgb)
+        plt.axis('off')  # Hide axes
+        plt.show()
+
     return image
 
-iface = gr.Interface(fn=detect, 
-                     inputs=gr.inputs.Image(label="Upload scanned document", type="filepath"), 
-                     outputs="image")
-iface.launch()
+def process_pdf(pdf_path, output_dir="output", dpi=300):
+    """
+    Convert each page of a PDF to an image, then run detection on each image.
+    
+    Args:
+    - pdf_path (str): Path to the PDF file.
+    - output_dir (str): Directory to save output images.
+    - dpi (int): Dots per inch for PDF-to-image conversion (default: 300).
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Convert PDF pages to images
+    pages = convert_from_path(pdf_path, dpi=dpi)
+    
+    # Process each page as an image
+    for i, page in enumerate(pages):
+        image_path = os.path.join(output_dir, f"page_{i+1}.jpg")
+        page.save(image_path, "JPEG")
+        print(f"Processing page {i+1}/{len(pages)}")
+        
+        # Detect objects in the image
+        detect(image_path, output_dir=output_dir, show_image=False)
+
+if __name__ == "__main__":
+    # Example usage for PDFs
+    input_pdf_path = "test.pdf"
+    process_pdf(input_pdf_path, output_dir="output", dpi=300)
